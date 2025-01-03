@@ -3,6 +3,7 @@ library(tidyverse)
 library(readxl)
 library(RMySQL)
 library(mlbplotR)
+library(writexl)
 
 #connect to MySQL server. I have my data stored in a MySQL database. THe data is originally taken from retrosheet
 conn <- dbConnect(MySQL(), dbname = "Baseball",
@@ -339,5 +340,8 @@ ggplot(elo_2024, aes(x = reorder(Team,-Elo), y = Elo)) +
   geom_mlb_logos(aes(team_abbr = Team), width = 0.02) +
   labs(x = "Team", y = "Elo rating", title = "MLB Elo ratings in 2023 season") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#then you can write these to an excel file to be used for analyses later
+write_xlsx(matchups, path= "~/MLB_ELO_Since_1995.xlsx")
 
 #These elos can be adjusted for strating pitchers to predict head-to-head matchups. I achieved 60% accuracy using ERA+ as an adjustment
