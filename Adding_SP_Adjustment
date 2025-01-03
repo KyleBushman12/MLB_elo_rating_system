@@ -1,0 +1,179 @@
+#load necessary libraries
+library(tidyverse)
+library(readxl)
+library(mlbplotR)
+library(rvest)
+
+#read in previously calculated elos
+Elo <- read_xlsx("~/MLB_ELO_Since_1995.xlsx")
+
+Elo$Season <- as.numeric(Elo$Season)
+
+#read in file containing pitcher stats since 1995 (I will provide this)
+Pitchers <- read_xlsx("~/Pitcher_Stats_Since_1995.xlsx")
+
+#tone down pitchers with extremely high ERA+, this is probably due to low sample size,
+#if not then I have found that pitchers better than this do not affect the game as strongly as this would suggest
+Pitchers$era_plus <- ifelse(Pitchers$era_plus > 150,
+                        150, Pitchers$era_plus)
+
+#do the same adjustment for low ERA+ pitchers
+Pitchers$era_plus <- ifelse(Pitchers$era_plus < 60,
+                        60, Pitchers$era_plus)
+
+#give pitchers with no ERA+ an average 100
+Pitchers$era_plus <- ifelse(is.na(Pitchers$era_plus) == TRUE,
+                        100, Pitchers$era_plus)
+
+#calculate IP/G to know how long the starter will remain in the game
+Pitchers <- Pitchers |>
+  select(Starter, Team, era_plus, G, IP, season) |>
+  mutate(IP_game = IP/G) |>
+  select(Starter, Team, era_plus, IP_game, season)
+
+#some pitcehrs have the same name as others, luckily this often occurred with a pitcher who did not have many games and could be excluded from the data
+Pitchers <- Pitchers |>
+  filter(!(Starter == "Logan Allen" & era_plus == 71),
+         !(Starter == "Luis Ortiz" & era_plus == 60),
+         !(Starter == "Pedro Martinez" & era_plus == 60),
+         !(Starter == "Pedro Martinez" & era_plus == 60),
+         !(Starter == "Pedro Martinez" & era_plus == 70),
+         !(Starter == "Greg Harris" & era_plus == 60),
+         !(Starter == "Jeff D'Amico" & era_plus == 60),
+         !(Starter == "Steve Sparks" & era_plus == 74),
+         !(Starter == "Chris Carpenter" & era_plus == 145),
+         !(Starter == "Ramon Ramirez" & era_plus == 150 & Team == "KCR"),
+         !(Starter == "Ramon Ramirez" & era_plus == 150 & Team == "BOS"),
+         !(Starter == "Chris Carpenter" & era_plus == 60),
+         !(Starter == "Miguel Gonzalez" & era_plus == 60),
+         !(Starter == "Chris Smith" & era_plus == 88),
+         !(Starter == "Austin Adams" & era_plus == 70),
+         !(Starter == "Luis Garcia" & era_plus == 62),
+         !(Starter == "Luis Garcia" & era_plus == 122),
+         !(Starter == "Luis Garcia" & era_plus == 112),
+         !(Starter == "Luis Garcia" & era_plus == 104),
+         !(Starter == "Luis Castillo" & era_plus == 100),
+         !(Starter == "Luis Ortiz" & era_plus == 150),
+         !(Starter == "Luis Ortiz" & era_plus == 132))
+
+#Bobby Jones is an exception, they both had plenty of starts, so I needed to distinguish between them
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Bobby Jones" &
+                             Pitchers$Team == "NYM" |
+                             Pitchers$Starter == "Bobby Jones" &
+                             Pitchers$Team == "SDP",
+                           "Bobby Jones 1", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Bobby Jones" &
+                             Pitchers$Team == "COL" |
+                             Pitchers$Starter == "Bobby Jones" &
+                             Pitchers$Team == "2TM" |
+                             Pitchers$Starter == "Bobby Jones" &
+                             Pitchers$Team == "BOS",
+                           "Bobby Jones 2", Pitchers$Starter)
+
+Elo$Starter <- ifelse(Elo$Starter == "Bobby Jones" &
+                             Elo$Team == "NYM" |
+                             Elo$Starter == "Bobby Jones" &
+                             Elo$Team == "SDP",
+                           "Bobby Jones 1", Elo$Starter)
+
+Elo$Starter <- ifelse(Elo$Starter == "Bobby Jones" &
+                             Elo$Team == "COL" |
+                             Elo$Starter == "Bobby Jones" &
+                             Elo$Team == "2TM" |
+                             Elo$Starter == "Bobby Jones" &
+                             Elo$Team == "BOS",
+                           "Bobby Jones 2", Elo$Starter)
+
+#some pitchers had a variation in their names across data, I fix that here
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Michael Soroka",
+                           "Mike Soroka", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "J.P. France",
+                           "J. P. France", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Jakob Junis",
+                           "Jake Junis", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Daniel Lynch IV",
+                           "Daniel Lynch", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Brent Honeywell Jr.",
+                           "Brent Honeywell", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Matthew Boyd",
+                           "Matt Boyd", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "J.T. Ginn",
+                           "J. T. Ginn", Pitchers$Starter)
+
+Pitchers$Starter <- ifelse(Pitchers$Starter == "Darren McCaughan",
+                           "Darren Scott McCaughan", Pitchers$Starter)
+
+#now I can add the pitchers stats to the game data
+Games <- left_join(Elo, Pitchers, by = c("Starter", "Season" = "season"))
+
+#I needed to get rid of this eighth column because it was redundant, so i name it "eight" and rename column one to "Team"
+colnames(Games)[8] <- "eight"
+colnames(Games)[1] <- "Team"
+
+#remove "eight"
+Games <- Games |>
+  select(-eight)
+
+#create a variables called "dup" to signify a duplicated pitcher in the data, this happens if a pitcher plays for 2 teams in one seasons
+#I don't care about their team splits, so I keep only their season summary stats
+Games$dup <- 0
+
+for(i in 1:nrow(Games)){
+  if(paste(Games$VH[i]) ==
+     paste(Games$VH[i+1])){
+    Games$dup[i+1] <- 1
+  }
+}
+
+#create adjustment factor using IP/G, ERA+ and Home/Away
+Games$adj_factor <- Games$IP_game*(Games$era_plus - 100)*0.6 +
+  ifelse(Games$VH == "H", 20, -20)
+
+#add adjustment factor to elo rating
+Games$adj_elo <- Games$Elo + Games$adj_factor
+
+#separate away teams
+vis <- Games |>
+  filter(VH == "V") |>
+  select(Team, Elo, Score, adj_elo)
+
+colnames(vis) <- c("Away_Team", "Away_Elo", "Away_Score", "Away_Adj_Elo")
+
+#separate home teams
+home <- Games |>
+  filter(VH == "H") |>
+  select(Team, Elo, Score, adj_elo)
+
+colnames(home) <- c("Home_Team", "Home_Elo", "Home_Score", "Home_Adj_Elo")
+
+#put home and away teams together
+matchups <- cbind(vis, home)
+
+#calculate win proabbility using the adjusted elo ratings and see if the games can be accurately predicted using this method
+matchups <- matchups |>
+  mutate(vis_win_prob = 1 / (1 + 10**((Home_Adj_Elo - Away_Adj_Elo) / 600)),
+         vis_win = ifelse(Away_Score > Home_Score, 1, 0),
+         predict_vis = ifelse(vis_win_prob >= 0.5, 1, 0),
+         correct = ifelse(vis_win == predict_vis, 1, 0))
+
+#get rid of matchups that failed to calculate because of missing data (there are only a handful since 1995, negligible)
+full_matchups <- na.omit(matchups)
+
+#calculate accuracy
+mean(full_matchups$correct)
+
+#calculate rmse
+sqrt(mean((full_matchups$vis_win - full_matchups$vis_win_prob)**2))
+
+#this plot allows you to see how your predicted win% compares to observed wins
+ggplot(full_matchups, aes(x = vis_win_prob, y = vis_win)) +
+  geom_point() +
+  geom_smooth() +
+  geom_abline(slope = 1)
