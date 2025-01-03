@@ -1,0 +1,343 @@
+#load needed libraries
+library(tidyverse)
+library(readxl)
+library(RMySQL)
+library(mlbplotR)
+
+#connect to MySQL server. I have my data stored in a MySQL database. THe data is originally taken from retrosheet
+conn <- dbConnect(MySQL(), dbname = "Baseball",
+                  user = user, password = password)
+
+#write SQL query. The table I want is called "gamelogs"
+query <- "
+SELECT Date, VisitorStartingPitcherName, VisitingTeam,
+  HomeStartingPitcherName, HomeTeam,
+  VisitorRunsScored, HomeRunsScore
+FROM gamelogs
+WHERE date > 19950101;
+"
+
+#run query
+gamelog <- dbGetQuery(conn, query)
+
+#disconnect from database
+dbDisconnect(conn)
+
+#get the gamelog headers from retrosheet and read them in here
+glheaders <- read.csv("~/game_log_header.csv")
+
+#2024 was not in my database yet so I read those games in this way
+gamelog_2024 <- read_csv("~/gl2024.txt",
+                    col_names = names(glheaders),
+                    na = character())
+
+#choose wanted variables
+gamelog_2024 <- gamelog_2024 |>
+  select(Date, VisitorStartingPitcherName, VisitingTeam,
+         HomeStartingPitcherName, HomeTeam,
+         VisitorRunsScored, HomeRunsScore)
+
+#add 2024 data to the gamelogs
+gamelog <- rbind(gamelog, gamelog_2024)
+
+#change the date variable to only the year
+gamelog$Date <- substr(gamelog$Date, 1, 4)
+
+#rename the date variable to season
+colnames(gamelog)[1] <- "Season"
+
+#create a data frame for the visiting teams
+Vis <- gamelog |>
+  select(VisitorStartingPitcherName, VisitingTeam, VisitorRunsScored, Season)
+
+#give each game an id
+Vis$id <- 1:nrow(Vis)
+
+#label the games as "V" for visitor
+Vis$VH <- "V"
+
+#pick the exact column names that I want
+colnames(Vis) <- c("Starter", "Team", "Score", "Season", "id", "VH")
+
+#create a data frame for the home teams
+Home <- gamelog |>
+  select(HomeStartingPitcherName, HomeTeam, HomeRunsScore, Season)
+
+#give each game an id
+Home$id <- 1:nrow(Home)
+
+#label the games as "H" for visitor
+Home$VH <- "H"
+
+#match witht the visiting team column names
+colnames(Home) <- c("Starter", "Team", "Score", "Season", "id", "VH")
+
+#put home and away games back together
+Games <- rbind(Vis, Home)
+
+#order the games so that the teams that played each other are next to each other
+Games <- Games |>
+  arrange(id, desc(VH))
+
+#lines 83-129 make sure that teams have a consistent abbreviation. Retrosheet's are different from usual. This also accounts for teams that have changed names over the years
+Games$Team <- ifelse(Games$Team == "LAN",
+                     "LAD", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "SDN",
+                     "SD", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "ARI",
+                     "AZ", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "WAS",
+                     "WSH", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "SLN",
+                     "STL", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "SFN",
+                     "SF", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "KCA",
+                     "KC", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "TBA",
+                     "TB", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "CHN",
+                     "CHC", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "NYN",
+                     "NYM", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "NYA",
+                     "NYY", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "ANA",
+                     "LAA", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "CHA",
+                     "CWS", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "FLO",
+                     "MIA", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "MON",
+                     "WSH", Games$Team)
+
+Games$Team <- ifelse(Games$Team == "CAL",
+                     "LAA", Games$Team)
+
+# probability of a team winning given the two elo ratings
+prob_win <- function(team_rating, opp_team_rating, divisor = 600){
+return(1 / (1 + 10**((opp_team_rating - team_rating) / divisor)))
+}
+
+# calculates the updated elo rating for a team based on the teams
+# current elo value, outcome of game, probability of winning, and margin of victory
+calc_new_rating <- function(team_rating, outcome, prob_win, mov, opp_team_rating){
+return(team_rating + (mov * (2.2/((abs(opp_team_rating - team_rating))*0.001 +
+                                    2.2)) * (outcome - prob_win)))
+}
+
+#this function calculates the elo ratings for a single season. It is necessary to calculate one season at a time because there is an adjustment after each season
+one_season_elo <- function(data, season){
+  data <- data |>
+    filter(Season == season)
+  # we for loop over the rows in the data set
+  # so each i is a different game
+  for(i in 1:nrow(data)){
+    # select the game id for the current game (used for indexing)
+    gameid = data$gameid[i]
+    # select the teams that play in game i
+    team1 = data$team1[i]
+    team2 = data$team2[i]
+    # select the teams elo going into game i
+    team1elo = data$elo1[i]
+    team2elo = data$elo2[i]
+    # outcome of game i
+    outcome = data$win[i]
+    # calculate the probability of winning based on current elo
+    prob1wins = prob_win(team1elo, team2elo)
+    prob2wins = prob_win(team2elo, team1elo)
+    # calculate the new elo rating for each team
+    new_rating_team1 = calc_new_rating(team1elo, outcome, prob1wins,
+                                       log(abs(data$marg_win[i])+1),
+                                       team2elo)
+
+    new_rating_team2 = calc_new_rating(team2elo, 1-outcome, prob2wins,
+                                       log(abs(data$marg_win[i])+1),
+                                       team1elo)
+    #### update the new values in the data frame
+    # select the next row corresponding with team 1 and 2, respectively
+    # we look for all the rows where team1 name is in and select the row
+    # corresponding to the NEXT    game
+    # same for team2
+    team1_ind = (1:nrow(data))[((data$team1 == team1) | (data$team2 == team1)) &
+    (data$gameid > gameid)][1]
+  
+    team2_ind = (1:nrow(data))[((data$team1 == team2) | (data$team2 == team2)) &
+    (data$gameid > gameid)][1]
+    # update team 1 elo
+    # we first need to check if there is a next value for the team
+    # if they do not go to the playoffs, there will be an NA at some point
+    # then, we need to determine if their updated value should be for team1
+    # or team2
+    if(!is.na(team1_ind)){
+      if(data$team1[team1_ind] == team1){ # see if they should be team 1
+        data$elo1[team1_ind] = new_rating_team1 # update
+      }
+      else{ # otherwise team 2
+        data$elo2[team1_ind] = new_rating_team1 # update
+      }
+    }
+    # same as directly above
+    if(!is.na(team2_ind)){
+      if(data$team2[team2_ind] == team2){
+        data$elo2[team2_ind] = new_rating_team2
+      }
+      else{
+        data$elo1[team2_ind] = new_rating_team2
+      }
+    }
+  }
+  return(data)
+}
+
+# find the first and last game of each season. This makes it easier to transfer elos to the new season
+Games <- Games |>
+  group_by(Season, Team) |>
+  mutate(
+    Count = row_number(),
+    instance = case_when(
+      Count == 1 ~ "First",                         
+      Count == n() ~ "Last",                          
+      TRUE ~ "Middle"                                
+    )
+  ) |>
+  ungroup()
+
+#create a variable to help locate home and away teams
+Games$num <- rep(c(1,2), nrow(Games)/2)
+
+#separate away teams
+away <- Games |>
+  filter(num == 1) |>
+  select(Team, Starter, Score, elo, Count, instance)
+
+#separate home teams
+home <- Games |>
+  filter(num == 2) |>
+  select(Team, Starter, Score, elo, Count, instance, Season)
+
+#put home and away back together in column format
+data <- cbind(away, home)
+
+#set the column names to what I want
+colnames(data) <- c("team1", "starter1", "score1", "elo1", "count1", "instance1",
+                    "team2", "starter2", "score2", "elo2", "count2", "instance2",
+                    "Season")
+
+#determine game winner
+data$win <- ifelse(data$score1 > data$score2,
+                   1, 0)
+
+#determine margin of victory
+data$marg_win <- abs(data$score1 - data$score2)
+
+#give each game a unique id
+data$gameid <- 1:nrow(data)
+
+#this function moves elos to the new season by populating the whole "data" data frame. This is ok because we are going to create a separate data frame to hold all elos as we go
+transfer_elos <- function(elos_current, season){
+  #keep only the last games of the season
+  final <- elos_current |>
+  filter(season == season, instance1 == "Last" | instance2 == "Last") |>
+  select(team1, elo1, instance1, team2, elo2, instance2)
+
+  #orient data into row format
+  fill <- data.frame(team = c(final$team1, final$team2),
+                     elo = c(final$elo1, final$elo2),
+                     instance = c(final$instance1, final$instance2))
+
+  #get rid of non-final games and adjust each team's elo 2/3 of the way back toward 1500. This is to account for uncertainty from trades and free agent signings
+  final <- fill |>
+    filter(instance == "Last") |>
+    arrange(team) |>
+    select(-instance) |>
+    mutate(elo = (elo + (2*1500))/3)
+
+  #move elos for away teams
+  data <- left_join(data, final, by = c("team1" = "team"))
+
+  data$elo1 <- data$elo
+
+  data <- data |>
+    select(-elo)
+
+  #move elos for home teams
+  data <- left_join(data, final, by = c("team2" = "team"))
+
+  data$elo2 <- data$elo
+
+  data <- data |>
+    select(-elo)
+
+  #these need to be done because the diamondbacks and the rays were introduced to the leauge in 1998 and won't have a rolling elo rating
+  data$elo1 <- ifelse(is.na(data$elo1) == TRUE, 1500, data$elo1)
+  data$elo2 <- ifelse(is.na(data$elo2) == TRUE, 1500, data$elo2)
+  
+  return(data)
+}
+
+#calculating the elos for 1995 must be done alone to intialize the process
+elos_current <- one_season_elo(data, 1995)
+
+#creates a data frame called "elos" to hold all calculated ratings
+elos <- elos_current
+
+#use the transfer funtion to get ready for 1996
+data <- transfer_elos(elos_current, 1995)
+
+#the remaining seasons can be done in a loop as below
+for(i in 1996:2024){
+  elos_current <- one_season_elo(data, i)
+  elos <- rbind(elos, elos_current)
+  data <- transfer_elos(elos_current, i)
+}
+
+#Now we get the data ready to investigate results
+
+#separate away teams
+Vis <- elos |>
+  select(team1, elo1, instance1, Season, gameid) |>
+  mutate(VH = "V")
+
+colnames(Vis) <- c("Team", "Elo", "instance", "Season", "gameid", "VH")
+
+#separate home teams
+Home <- elos |>
+  select(team2, elo2, instance2, Season, gameid) |>
+  mutate(VH = "H")
+
+colnames(Home) <- c("Team", "Elo", "instance", "Season", "gameid", "VH")
+
+#put home and away back together in row form
+Elo <- rbind(Vis, Home)
+
+#order by game id and home away so opponents are nearby, then remove all games that are not season ending games
+Elo <- Elo |>
+  arrange(gameid, desc(VH)) |>
+  filter(instance == "Last")
+
+#get only 2024 elos
+elo_2024 <- Elo |>
+  filter(Season == 2024)
+
+#plot the 2024 elos and compare to standings and WS results (Dodgers won WS as predicted by these ratings, this is true 3/10 times since 2015 with this system)
+ggplot(elo_2024, aes(x = reorder(Team,-Elo), y = Elo)) +
+  geom_mlb_logos(aes(team_abbr = Team), width = 0.02) +
+  labs(x = "Team", y = "Elo rating", title = "MLB Elo ratings in 2023 season") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#These elos can be adjusted for strating pitchers to predict head-to-head matchups. I achieved 60% accuracy using ERA+ as an adjustment
