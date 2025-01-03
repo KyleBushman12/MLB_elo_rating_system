@@ -2,7 +2,6 @@
 library(tidyverse)
 library(readxl)
 library(mlbplotR)
-library(rvest)
 
 #read in previously calculated elos
 Elo <- read_xlsx("~/MLB_ELO_Since_1995.xlsx")
